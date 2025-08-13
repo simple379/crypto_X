@@ -25,9 +25,10 @@ NEWS_FEEDS = [
 COINGECKO_API = "https://api.coingecko.com/api/v3"
 ALTERNATIVE_API = "https://api.alternative.me"
 
-# --- Global Cache ---
+# --- Global Variables ---
 CACHE = {}
 CACHE_EXPIRY = 300  # 5 minutes
+COIN_ID_MAP = {} # To store coin symbols and their corresponding IDs
 
 # --- Disclaimer ---
 DISCLAIMER = """
@@ -41,6 +42,20 @@ DISCLAIMER = """
 
 # --- Helper Functions ---
 
+def load_coin_list():
+    """Loads the full list of coins from CoinGecko and creates a symbol -> id map."""
+    global COIN_ID_MAP
+    try:
+        print("Loading coin list from CoinGecko...")
+        url = f"{COINGECKO_API}/coins/list"
+        response = requests.get(url)
+        response.raise_for_status()
+        coin_list = response.json()
+        COIN_ID_MAP = {coin['symbol'].lower(): coin['id'] for coin in coin_list}
+        print(f"Successfully loaded {len(COIN_ID_MAP)} coins.")
+    except Exception as e:
+        print(f"FATAL: Could not load coin list. The bot may not function correctly. Error: {e}")
+
 def get_cached_data(key, func, *args, **kwargs):
     """Cache data to reduce API calls."""
     now = time.time()
@@ -52,25 +67,8 @@ def get_cached_data(key, func, *args, **kwargs):
     return data
 
 def get_coin_id_from_symbol(symbol: str):
-    """Get CoinGecko coin ID from a symbol using the search endpoint."""
-    try:
-        # Use the search endpoint which is more efficient and reliable
-        url = f"{COINGECKO_API}/search?query={symbol}"
-        response = requests.get(url)
-        response.raise_for_status()
-        data = response.json()
-        
-        if data.get('coins'):
-            # Prioritize exact symbol match
-            for coin in data['coins']:
-                if coin['symbol'].lower() == symbol.lower():
-                    return coin['id']
-            # Fallback to the first result if no exact symbol match is found
-            return data['coins'][0]['id']
-        return None
-    except Exception as e:
-        print(f"Error in get_coin_id_from_symbol for '{symbol}': {e}")
-        return None
+    """Get CoinGecko coin ID from the pre-loaded map."""
+    return COIN_ID_MAP.get(symbol.lower())
 
 def get_trending_coins():
     """Fetches the top 10 trending coins from CoinGecko."""
@@ -377,10 +375,18 @@ async def disclaimer_command(update: telegram.Update, context: ContextTypes.DEFA
 
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Log errors caused by updates."""
-    print(f"Update {update} caused error {context.error}")
+    # The 'update' object may be None in some cases, so we handle that.
+    if update:
+        print(f"Update {update} caused error {context.error}")
+    else:
+        print(f"An error occurred: {context.error}")
+
 
 def main() -> None:
     """Start the bot."""
+    # Load the coin list at startup to prevent rate limiting
+    load_coin_list()
+    
     application = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
 
     # Add command handlers
@@ -401,6 +407,8 @@ def main() -> None:
     application.add_error_handler(error_handler)
 
     # Start polling
+    # The "Conflict" error means you have two bots running with the same token.
+    # On your hosting service (like Render), ensure only ONE instance of this script is running.
     print("Crypto Guru bot is running...")
     application.run_polling()
 
