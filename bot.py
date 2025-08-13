@@ -16,7 +16,7 @@ import asyncio
 # IMPORTANT: You'll need a Telegram Bot Token from BotFather on Telegram.
 # It's highly recommended to set this as an environment variable on Render
 # and not hardcode it.
-TELEGRAM_BOT_TOKEN = os.environ.get('TELEGRAM_BOT_TOKEN', 'YOUR_FALLBACK_TOKEN_HERE')
+TELEGRAM_BOT_TOKEN = os.environ.get('TELEGRAM_BOT_TOKEN', '7972609552:AAHZvzeRP1B96Nezt0rFnCo54ahKMAiIVH4')
 
 # --- Data Sources & APIs ---
 NEWS_FEEDS = [
@@ -434,3 +434,4 @@ if __name__ == '__main__':
     # It should be run in a separate thread so it doesn't block the bot.
     keep_alive() 
     main()
+
