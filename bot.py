@@ -1,7 +1,7 @@
 from keep_alive import keep_alive
 import telegram
 from telegram.ext import Application, CommandHandler, ContextTypes
-import requests
+import httpx  # Use httpx for async requests
 import feedparser
 import os
 from datetime import datetime
@@ -10,10 +10,13 @@ import matplotlib.pyplot as plt
 import io
 import pandas as pd
 import time
+import asyncio
 
 # --- Configuration ---
 # IMPORTANT: You'll need a Telegram Bot Token from BotFather on Telegram.
-TELEGRAM_BOT_TOKEN = os.environ.get('TELEGRAM_BOT_TOKEN', '7972609552:AAHZvzeRP1B96Nezt0rFnCo54ahKMAiIVH4')
+# It's highly recommended to set this as an environment variable on Render
+# and not hardcode it.
+TELEGRAM_BOT_TOKEN = os.environ.get('TELEGRAM_BOT_TOKEN', 'YOUR_FALLBACK_TOKEN_HERE')
 
 # --- Data Sources & APIs ---
 NEWS_FEEDS = [
@@ -39,78 +42,98 @@ DISCLAIMER = """
 - Never invest more than you can afford to lose
 """
 
-# --- Helper Functions ---
+# --- Helper Functions (Now Async) ---
 
-def get_cached_data(key, func, *args, **kwargs):
-    """Cache data to reduce API calls."""
+async def get_cached_data(key, func, *args, **kwargs):
+    """Cache data to reduce API calls. Now supports async functions."""
     now = time.time()
     if key in CACHE and now - CACHE[key]['timestamp'] < CACHE_EXPIRY:
         return CACHE[key]['data']
     
-    data = func(*args, **kwargs)
-    CACHE[key] = {'data': data, 'timestamp': now}
+    # Await the async data-fetching function
+    data = await func(*args, **kwargs)
+    if data: # Only cache successful requests
+        CACHE[key] = {'data': data, 'timestamp': now}
     return data
 
-def get_coin_id_from_symbol(symbol: str):
-    """Get CoinGecko coin ID from a symbol."""
+async def _fetch_coins_list():
+    """Internal function to fetch the coin list for caching."""
+    try:
+        async with httpx.AsyncClient() as client:
+            response = await client.get(f"{COINGECKO_API}/coins/list", timeout=10)
+            response.raise_for_status()
+            return response.json()
+    except httpx.RequestError as e:
+        print(f"Error fetching coin list: {e}")
+        return None
+
+async def get_coin_id_from_symbol(symbol: str):
+    """Get CoinGecko coin ID from a symbol using async requests."""
     symbol = symbol.lower()
-    coin_list = get_cached_data("coins_list", lambda: requests.get(f"{COINGECKO_API}/coins/list").json())
+    # Use the async caching mechanism
+    coin_list = await get_cached_data("coins_list", _fetch_coins_list)
     
+    if not coin_list:
+        return None
+
     for coin in coin_list:
         if coin['symbol'] == symbol:
             return coin['id']
     return None
 
-def get_trending_coins():
-    """Fetches the top 10 trending coins from CoinGecko."""
+async def get_trending_coins():
+    """Fetches the top 10 trending coins from CoinGecko asynchronously."""
     try:
-        url = f"{COINGECKO_API}/search/trending"
-        response = requests.get(url)
-        response.raise_for_status()
-        data = response.json()
-        
-        if 'coins' in data:
-            message = "🔥 **Top 10 Trending Coins** 🔥\n\n"
-            for i, coin in enumerate(data['coins'][:10]):
-                item = coin['item']
-                message += (
-                    f"{i+1}. **{item['name']} ({item['symbol']})**\n"
-                    f"   - Rank: {item['market_cap_rank']}\n"
-                    f"   - Price (BTC): {item['price_btc']:.8f}\n\n"
-                )
-            return message
+        async with httpx.AsyncClient() as client:
+            url = f"{COINGECKO_API}/search/trending"
+            response = await client.get(url, timeout=10)
+            response.raise_for_status()
+            data = response.json()
+            
+            if 'coins' in data:
+                message = "🔥 **Top 10 Trending Coins** 🔥\n\n"
+                for i, coin in enumerate(data['coins'][:10]):
+                    item = coin['item']
+                    message += (
+                        f"{i+1}. **{item['name']} ({item['symbol']})**\n"
+                        f"   - Rank: {item['market_cap_rank']}\n"
+                        f"   - Price (BTC): {item['price_btc']:.8f}\n\n"
+                    )
+                return message
         return "Could not retrieve trending coins."
-    except requests.exceptions.RequestException as e:
+    except httpx.RequestError as e:
         print(f"Error fetching trending coins: {e}")
         return "An error occurred while fetching trending coins."
 
-def get_top_coins(limit=20):
-    """Get top coins by market cap from CoinGecko."""
+async def get_top_coins(limit=20):
+    """Get top coins by market cap from CoinGecko asynchronously."""
     try:
         params = {"vs_currency": "usd", "order": "market_cap_desc", "per_page": limit, "page": 1, "sparkline": False}
-        response = requests.get(f"{COINGECKO_API}/coins/markets", params=params)
-        response.raise_for_status()
-        coins = response.json()
-        
-        message = "🏆 *Top 20 Cryptocurrencies by Market Cap* 🏆\n\n"
-        for coin in coins:
-            change_icon = "📈" if coin.get("price_change_percentage_24h", 0) >= 0 else "📉"
-            message += (
-                f"{coin['market_cap_rank']}. **{coin['name']} ({coin['symbol'].upper()})**\n"
-                f"   - Price: ${coin['current_price']:,.2f}\n"
-                f"   - 24h Change: {change_icon} {coin['price_change_percentage_24h']:.2f}%\n"
-                f"   - Market Cap: ${coin['market_cap']:,}\n\n"
-            )
-        return message
-    except requests.exceptions.RequestException as e:
+        async with httpx.AsyncClient() as client:
+            response = await client.get(f"{COINGECKO_API}/coins/markets", params=params, timeout=10)
+            response.raise_for_status()
+            coins = response.json()
+            
+            message = "🏆 *Top 20 Cryptocurrencies by Market Cap* 🏆\n\n"
+            for coin in coins:
+                change_icon = "📈" if coin.get("price_change_percentage_24h", 0) >= 0 else "📉"
+                message += (
+                    f"{coin['market_cap_rank']}. **{coin['name']} ({coin['symbol'].upper()})**\n"
+                    f"   - Price: ${coin['current_price']:,.2f}\n"
+                    f"   - 24h Change: {change_icon} {coin.get('price_change_percentage_24h', 0):.2f}%\n"
+                    f"   - Market Cap: ${coin['market_cap']:,}\n\n"
+                )
+            return message
+    except httpx.RequestError as e:
         print(f"Error getting top coins: {e}")
         return "An error occurred while fetching top coins."
 
 def get_crypto_news():
-    """Fetches and combines news from multiple public RSS feeds."""
+    """Fetches and combines news from multiple public RSS feeds. This remains synchronous as feedparser is not async."""
     all_entries = []
     for feed_url in NEWS_FEEDS:
         try:
+            # feedparser is blocking, so we run it in a separate thread to not block the event loop
             feed = feedparser.parse(feed_url)
             for entry in feed.entries:
                 publish_time = entry.get('published_parsed', datetime.now().timetuple())
@@ -128,23 +151,24 @@ def get_crypto_news():
         message += f"• [{entry['title']}]({entry['link']}) ({entry['source']})\n"
     return message
 
-def get_coin_price(symbol: str):
-    """Fetches detailed price data for a specific coin."""
+async def get_coin_price(symbol: str):
+    """Fetches detailed price data for a specific coin asynchronously."""
     if not symbol:
         return "Please provide a coin symbol. Example: `/price btc`"
         
-    coin_id = get_coin_id_from_symbol(symbol)
+    coin_id = await get_coin_id_from_symbol(symbol)
     if not coin_id:
-        return f"Could not find a coin with the symbol '{symbol}'."
+        return f"Could not find a coin with the symbol '{symbol.upper()}'."
 
     try:
         url = f"{COINGECKO_API}/simple/price?ids={coin_id}&vs_currencies=usd&include_market_cap=true&include_24hr_vol=true&include_24hr_change=true"
-        response = requests.get(url)
-        response.raise_for_status()
-        data = response.json()
+        async with httpx.AsyncClient() as client:
+            response = await client.get(url, timeout=10)
+            response.raise_for_status()
+            data = response.json()
 
         if coin_id not in data:
-            return f"Could not find data for '{coin_id}'. Please use the coin's ID from CoinGecko."
+            return f"Could not find price data for '{coin_id}'. Please try again."
 
         coin_data = data[coin_id]
         price = coin_data.get('usd', 0)
@@ -158,21 +182,22 @@ def get_coin_price(symbol: str):
                 f"{change_emoji} **24h Change:** {change_24h:.2f}%\n"
                 f"📊 **24h Volume:** ${vol_24h:,.2f}\n"
                 f"🏦 **Market Cap:** ${market_cap:,.2f}\n")
-    except requests.exceptions.RequestException as e:
+    except httpx.RequestError as e:
         print(f"Error fetching coin price for {coin_id}: {e}")
-        return f"An error occurred while fetching price data for {coin_id}."
+        return f"An error occurred while fetching price data for {coin_id.upper()}."
 
-def get_historical_data(symbol: str, days=7):
-    """Get historical price data for a chart."""
-    coin_id = get_coin_id_from_symbol(symbol)
+async def get_historical_data(symbol: str, days=7):
+    """Get historical price data for a chart asynchronously."""
+    coin_id = await get_coin_id_from_symbol(symbol)
     if not coin_id:
         return None
         
     try:
         params = {"vs_currency": "usd", "days": days}
-        response = requests.get(f"{COINGECKO_API}/coins/{coin_id}/market_chart", params=params)
-        response.raise_for_status()
-        data = response.json()
+        async with httpx.AsyncClient() as client:
+            response = await client.get(f"{COINGECKO_API}/coins/{coin_id}/market_chart", params=params, timeout=15)
+            response.raise_for_status()
+            data = response.json()
         
         if not data.get("prices"):
             return None
@@ -181,12 +206,12 @@ def get_historical_data(symbol: str, days=7):
         timestamps = [pd.to_datetime(p[0], unit='ms') for p in prices]
         values = [p[1] for p in prices]
         return {"timestamps": timestamps, "prices": values, "coin": symbol.upper()}
-    except requests.exceptions.RequestException as e:
+    except httpx.RequestError as e:
         print(f"Error getting historical data for {coin_id}: {e}")
         return None
 
 def generate_price_chart(historical_data):
-    """Generate a price chart image."""
+    """Generate a price chart image. This is CPU-bound and can remain synchronous."""
     plt.figure(figsize=(10, 5))
     plt.plot(historical_data["timestamps"], historical_data["prices"], color='#007bff')
     plt.title(f"{historical_data['coin']} 7-Day Price Chart")
@@ -200,12 +225,14 @@ def generate_price_chart(historical_data):
     plt.close()
     return buf
 
-def get_fear_and_greed_index():
-    """Fetches the Crypto Fear & Greed Index."""
+async def get_fear_and_greed_index():
+    """Fetches the Crypto Fear & Greed Index asynchronously."""
     try:
-        response = requests.get(f"{ALTERNATIVE_API}/fng/")
-        response.raise_for_status()
-        data = response.json()['data'][0]
+        async with httpx.AsyncClient() as client:
+            response = await client.get(f"{ALTERNATIVE_API}/fng/", timeout=10)
+            response.raise_for_status()
+            data = response.json()['data'][0]
+        
         value = int(data['value'])
         classification = data['value_classification']
         
@@ -213,23 +240,25 @@ def get_fear_and_greed_index():
         if "Greed" in classification: emoji = "🤑"
         if "Neutral" in classification: emoji = "😐"
         
-        meter = "[" + "=" * (value // 10) + " " * (10 - value // 10) + "]"
+        meter = "[" + "🟩" * (value // 10) + "⬜️" * (10 - value // 10) + "]"
 
         return (f"😨😊 **Crypto Fear & Greed Index** 😊😨\n\n"
                 f"Current Value: `{value}` - *{classification}*\n"
                 f"{meter}\n\n"
                 "0-24: Extreme Fear\n25-44: Fear\n45-54: Neutral\n"
                 "55-74: Greed\n75-100: Extreme Greed")
-    except requests.exceptions.RequestException as e:
+    except httpx.RequestError as e:
         print(f"Error fetching Fear & Greed Index: {e}")
         return "Could not retrieve the Fear & Greed Index."
 
-def get_market_overview():
-    """Get overall cryptocurrency market data."""
+async def get_market_overview():
+    """Get overall cryptocurrency market data asynchronously."""
     try:
-        response = requests.get(f"{COINGECKO_API}/global")
-        response.raise_for_status()
-        data = response.json().get("data", {})
+        async with httpx.AsyncClient() as client:
+            response = await client.get(f"{COINGECKO_API}/global", timeout=10)
+            response.raise_for_status()
+            data = response.json().get("data", {})
+        
         change_icon = "📈" if data.get("market_cap_change_percentage_24h_usd", 0) >= 0 else "📉"
         
         return (f"🌐 *Cryptocurrency Market Overview* 🌐\n\n"
@@ -238,22 +267,25 @@ def get_market_overview():
                 f"24h Change: `{change_icon} {data.get('market_cap_change_percentage_24h_usd', 0):.2f}%`\n"
                 f"Bitcoin Dominance: `{data.get('market_cap_percentage', {}).get('btc', 0):.1f}%`\n"
                 f"Active Cryptos: `{data.get('active_cryptocurrencies', 0):,}`")
-    except requests.exceptions.RequestException as e:
+    except httpx.RequestError as e:
         print(f"Error getting market overview: {e}")
         return "Could not retrieve market data."
 
-def convert_currency(amount, from_symbol, to_symbol):
-    """Convert between cryptocurrencies or to fiat."""
-    from_id = get_coin_id_from_symbol(from_symbol)
-    to_id = get_coin_id_from_symbol(to_symbol)
+async def convert_currency(amount, from_symbol, to_symbol):
+    """Convert between cryptocurrencies or to fiat asynchronously."""
+    from_id, to_id = await asyncio.gather(
+        get_coin_id_from_symbol(from_symbol),
+        get_coin_id_from_symbol(to_symbol)
+    )
 
     if not from_id or not to_id:
         return None
 
     try:
-        response = requests.get(f"{COINGECKO_API}/simple/price?ids={from_id},{to_id}&vs_currencies=usd")
-        response.raise_for_status()
-        data = response.json()
+        async with httpx.AsyncClient() as client:
+            response = await client.get(f"{COINGECKO_API}/simple/price?ids={from_id},{to_id}&vs_currencies=usd", timeout=10)
+            response.raise_for_status()
+            data = response.json()
         
         from_usd = data.get(from_id, {}).get("usd")
         to_usd = data.get(to_id, {}).get("usd")
@@ -267,7 +299,7 @@ def convert_currency(amount, from_symbol, to_symbol):
         print(f"Conversion error: {e}")
         return None
 
-# --- Telegram Command Handlers ---
+# --- Telegram Command Handlers (Now calling async helpers) ---
 
 async def start_command(update: telegram.Update, context: ContextTypes.DEFAULT_TYPE):
     welcome = (f"👋 *Welcome to Crypto Guru!* 👋\n"
@@ -292,15 +324,16 @@ async def help_command(update: telegram.Update, context: ContextTypes.DEFAULT_TY
     await update.message.reply_text(help_text, parse_mode='Markdown')
 
 async def trending_command(update: telegram.Update, context: ContextTypes.DEFAULT_TYPE):
-    message = get_cached_data("trending", get_trending_coins)
+    message = await get_cached_data("trending", get_trending_coins)
     await update.message.reply_text(message, parse_mode='Markdown')
 
 async def top_command(update: telegram.Update, context: ContextTypes.DEFAULT_TYPE):
-    message = get_cached_data("top_coins", get_top_coins)
+    message = await get_cached_data("top_coins", get_top_coins)
     await update.message.reply_text(message, parse_mode='Markdown')
 
 async def news_command(update: telegram.Update, context: ContextTypes.DEFAULT_TYPE):
-    message = get_cached_data("news", get_crypto_news)
+    # Running blocking code in a separate thread
+    message = await asyncio.to_thread(get_crypto_news)
     await update.message.reply_text(message, parse_mode='Markdown', disable_web_page_preview=True)
 
 async def price_command(update: telegram.Update, context: ContextTypes.DEFAULT_TYPE):
@@ -308,7 +341,7 @@ async def price_command(update: telegram.Update, context: ContextTypes.DEFAULT_T
         await update.message.reply_text("ℹ️ Please specify a coin. Example: `/price btc`")
         return
     coin_symbol = context.args[0].lower()
-    message = get_coin_price(coin_symbol)
+    message = await get_coin_price(coin_symbol)
     await update.message.reply_text(f"{message}\n\n{DISCLAIMER}", parse_mode='Markdown')
 
 async def price7d_command(update: telegram.Update, context: ContextTypes.DEFAULT_TYPE):
@@ -316,21 +349,24 @@ async def price7d_command(update: telegram.Update, context: ContextTypes.DEFAULT
         await update.message.reply_text("ℹ️ Please specify a coin. Example: `/price7d btc`")
         return
     coin_symbol = context.args[0].lower()
-    historical_data = get_historical_data(coin_symbol, days=7)
+    await update.message.reply_text(f"⏳ Generating chart for {coin_symbol.upper()}...")
+    
+    historical_data = await get_historical_data(coin_symbol, days=7)
     
     if not historical_data:
-        await update.message.reply_text(f"❌ Couldn't get historical data for {coin_symbol}.")
+        await context.bot.send_message(chat_id=update.effective_chat.id, text=f"❌ Couldn't get historical data for {coin_symbol}.")
         return
         
-    chart_buf = generate_price_chart(historical_data)
+    # Run the chart generation in a thread to avoid blocking
+    chart_buf = await asyncio.to_thread(generate_price_chart, historical_data)
     await update.message.reply_photo(photo=chart_buf, caption=f"7-day price chart for {coin_symbol.upper()}", parse_mode='Markdown')
 
 async def feargreed_command(update: telegram.Update, context: ContextTypes.DEFAULT_TYPE):
-    message = get_cached_data("fear_greed", get_fear_and_greed_index)
+    message = await get_cached_data("fear_greed", get_fear_and_greed_index)
     await update.message.reply_text(f"{message}\n\n{DISCLAIMER}", parse_mode='Markdown')
     
 async def market_command(update: telegram.Update, context: ContextTypes.DEFAULT_TYPE):
-    message = get_cached_data("market_overview", get_market_overview)
+    message = await get_cached_data("market_overview", get_market_overview)
     await update.message.reply_text(f"{message}\n\n{DISCLAIMER}", parse_mode='Markdown')
 
 async def convert_command(update: telegram.Update, context: ContextTypes.DEFAULT_TYPE):
@@ -340,7 +376,7 @@ async def convert_command(update: telegram.Update, context: ContextTypes.DEFAULT
     
     try:
         amount, from_currency, to_currency = float(context.args[0]), context.args[1], context.args[3]
-        result = convert_currency(amount, from_currency, to_currency)
+        result = await convert_currency(amount, from_currency, to_currency)
         
         if result is None:
             await update.message.reply_text("❌ Couldn't perform conversion. Check your currencies.")
@@ -394,5 +430,7 @@ def main() -> None:
     application.run_polling()
 
 if __name__ == '__main__':
-    keep_alive()
+    # keep_alive() is used to run a web server to keep the Render service active.
+    # It should be run in a separate thread so it doesn't block the bot.
+    keep_alive() 
     main()
