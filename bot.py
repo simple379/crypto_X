@@ -52,14 +52,25 @@ def get_cached_data(key, func, *args, **kwargs):
     return data
 
 def get_coin_id_from_symbol(symbol: str):
-    """Get CoinGecko coin ID from a symbol."""
-    symbol = symbol.lower()
-    coin_list = get_cached_data("coins_list", lambda: requests.get(f"{COINGECKO_API}/coins/list").json())
-    
-    for coin in coin_list:
-        if coin['symbol'] == symbol:
-            return coin['id']
-    return None
+    """Get CoinGecko coin ID from a symbol using the search endpoint."""
+    try:
+        # Use the search endpoint which is more efficient and reliable
+        url = f"{COINGECKO_API}/search?query={symbol}"
+        response = requests.get(url)
+        response.raise_for_status()
+        data = response.json()
+        
+        if data.get('coins'):
+            # Prioritize exact symbol match
+            for coin in data['coins']:
+                if coin['symbol'].lower() == symbol.lower():
+                    return coin['id']
+            # Fallback to the first result if no exact symbol match is found
+            return data['coins'][0]['id']
+        return None
+    except Exception as e:
+        print(f"Error in get_coin_id_from_symbol for '{symbol}': {e}")
+        return None
 
 def get_trending_coins():
     """Fetches the top 10 trending coins from CoinGecko."""
@@ -135,7 +146,7 @@ def get_coin_price(symbol: str):
         
     coin_id = get_coin_id_from_symbol(symbol)
     if not coin_id:
-        return f"Could not find a coin with the symbol '{symbol}'."
+        return f"Could not find a coin with the symbol '{symbol.upper()}'."
 
     try:
         url = f"{COINGECKO_API}/simple/price?ids={coin_id}&vs_currencies=usd&include_market_cap=true&include_24hr_vol=true&include_24hr_change=true"
@@ -144,7 +155,7 @@ def get_coin_price(symbol: str):
         data = response.json()
 
         if coin_id not in data:
-            return f"Could not find data for '{coin_id}'. Please use the coin's ID from CoinGecko."
+            return f"Could not find price data for '{coin_id}'."
 
         coin_data = data[coin_id]
         price = coin_data.get('usd', 0)
@@ -305,7 +316,7 @@ async def news_command(update: telegram.Update, context: ContextTypes.DEFAULT_TY
 
 async def price_command(update: telegram.Update, context: ContextTypes.DEFAULT_TYPE):
     if not context.args:
-        await update.message.reply_text("ℹ️ Please specify a coin. Example: `/price btc`")
+        await update.message.reply_text("ℹ️ Please specify a coin symbol. Example: `/price btc`")
         return
     coin_symbol = context.args[0].lower()
     message = get_coin_price(coin_symbol)
@@ -313,13 +324,13 @@ async def price_command(update: telegram.Update, context: ContextTypes.DEFAULT_T
 
 async def price7d_command(update: telegram.Update, context: ContextTypes.DEFAULT_TYPE):
     if not context.args:
-        await update.message.reply_text("ℹ️ Please specify a coin. Example: `/price7d btc`")
+        await update.message.reply_text("ℹ️ Please specify a coin symbol. Example: `/price7d btc`")
         return
     coin_symbol = context.args[0].lower()
     historical_data = get_historical_data(coin_symbol, days=7)
     
     if not historical_data:
-        await update.message.reply_text(f"❌ Couldn't get historical data for {coin_symbol}.")
+        await update.message.reply_text(f"❌ Couldn't get historical data for {coin_symbol.upper()}.")
         return
         
     chart_buf = generate_price_chart(historical_data)
@@ -364,7 +375,7 @@ async def learn_command(update: telegram.Update, context: ContextTypes.DEFAULT_T
 async def disclaimer_command(update: telegram.Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(DISCLAIMER, parse_mode='Markdown')
 
-def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
+async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Log errors caused by updates."""
     print(f"Update {update} caused error {context.error}")
 
@@ -396,4 +407,3 @@ def main() -> None:
 if __name__ == '__main__':
     keep_alive()
     main()
-
