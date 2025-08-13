@@ -1,4 +1,4 @@
-##from keep_alive import keep_alive
+from keep_alive import keep_alive
 import telegram
 from telegram.ext import Application, CommandHandler, ContextTypes
 import requests
@@ -394,5 +394,6 @@ def main() -> None:
     application.run_polling()
 
 if __name__ == '__main__':
-##    keep_alive()
+    keep_alive()
     main()
+
