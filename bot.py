@@ -42,8 +42,13 @@ MAX_RETRIES = 3
 COIN_ALIASES = {
     'ton': 'the-open-network',
     'bnb': 'binancecoin',
-    'shib': 'shiba-inu'
+    'shib': 'shiba-inu',
+    'w': 'wormhole'
 }
+
+# --- Global HTTP Client ---
+# Use a single client for connection pooling, which is much more efficient.
+api_client = httpx.AsyncClient(timeout=15)
 
 # --- Disclaimer ---
 DISCLAIMER = """
@@ -59,25 +64,24 @@ DISCLAIMER = """
 
 async def make_api_request(url: str, params: dict = None):
     """
-    A robust, rate-limited, and retrying API request handler.
+    A robust, rate-limited, and retrying API request handler using a global client.
     """
     async with API_SEMAPHORE:
         for attempt in range(MAX_RETRIES):
             try:
-                async with httpx.AsyncClient() as client:
-                    response = await client.get(url, params=params, timeout=15)
-                    response.raise_for_status()
-                    return response.json()
+                response = await api_client.get(url, params=params)
+                response.raise_for_status()
+                return response.json()
             except httpx.HTTPStatusError as e:
                 if e.response.status_code == 429:
                     wait_time = 2 ** (attempt + 1)
-                    logger.warning(f"Rate limit hit for {url}. Retrying in {wait_time}s...")
+                    logger.warning(f"Rate limit hit for {e.request.url}. Retrying in {wait_time}s...")
                     await asyncio.sleep(wait_time)
                 else:
-                    logger.error(f"HTTP error for {url}: {e}")
+                    logger.error(f"HTTP error for {e.request.url}: {e}")
                     return None
             except httpx.RequestError as e:
-                logger.error(f"Request error for {url}: {e}")
+                logger.error(f"Request error for {e.request.url}: {e}")
                 return None
     logger.error(f"API request failed for {url} after {MAX_RETRIES} retries.")
     return None
@@ -103,8 +107,6 @@ async def get_coin_id_from_symbol(symbol: str):
     Handles common aliases.
     """
     query = symbol.lower()
-    
-    # Check aliases first
     if query in COIN_ALIASES:
         return COIN_ALIASES[query]
 
@@ -187,20 +189,26 @@ async def get_coin_price(symbol: str):
     if not coin_id:
         return f"❌ Could not find a coin with the symbol '{symbol.upper()}'."
 
-    params = {"vs_currencies": "usd", "include_market_cap": "true", "include_24hr_vol": "true", "include_24hr_change": "true"}
-    data = await make_api_request(f"{COINGECKO_API}/simple/price?ids={coin_id}", params=params)
+    params = {
+        "ids": coin_id,
+        "vs_currencies": "usd",
+        "include_market_cap": "true",
+        "include_24hr_vol": "true",
+        "include_24hr_change": "true"
+    }
+    data = await make_api_request(f"{COINGECKO_API}/simple/price", params=params)
 
     if not data or coin_id not in data:
-        return f"❌ Could not retrieve price data for {symbol.upper()}. Please try again."
+        return f"❌ Could not retrieve price data for {symbol.upper()}. The API might be busy."
 
     coin_data = data[coin_id]
     price = coin_data.get('usd', 0)
     market_cap = coin_data.get('usd_market_cap', 0)
     vol_24h = coin_data.get('usd_24h_vol', 0)
     change_24h = coin_data.get('usd_24h_change', 0)
-    change_emoji = "📈" if change_24h >= 0 else "📉"
+    change_emoji = "📈" if (change_24h or 0) >= 0 else "📉"
 
-    return (f"**{symbol.upper()} ({coin_id.capitalize()}) Price**\n\n"
+    return (f"**{symbol.upper()} ({coin_id.replace('-', ' ').title()}) Price**\n\n"
             f"💰 **Price:** ${price:,.4f}\n"
             f"{change_emoji} **24h Change:** {change_24h:.2f}%\n"
             f"📊 **24h Volume:** ${vol_24h:,.2f}\n"
@@ -235,7 +243,7 @@ def generate_price_chart(historical_data):
     ax.spines['left'].set_color('grey')
 
     ax.plot(historical_data["timestamps"], historical_data["prices"], color='#007bff', linewidth=2)
-    ax.set_title(f"{historical_data['coin']} {len(historical_data['timestamps']) > 1 and (historical_data['timestamps'][-1] - historical_data['timestamps'][0]).days}-Day Price Chart", color='white', fontsize=16)
+    ax.set_title(f"{historical_data['coin']} 7-Day Price Chart", color='white', fontsize=16)
     ax.set_xlabel("Date", color='grey')
     ax.set_ylabel("Price (USD)", color='grey')
     ax.grid(True, linestyle='--', alpha=0.2)
@@ -267,6 +275,47 @@ async def get_fear_and_greed_index():
             "0-24: Extreme Fear\n25-44: Fear\n45-54: Neutral\n"
             "55-74: Greed\n75-100: Extreme Greed")
 
+async def get_market_overview():
+    """Get overall cryptocurrency market data asynchronously."""
+    data = await make_api_request(f"{COINGECKO_API}/global")
+    if not data or 'data' not in data:
+        return "Could not retrieve market data."
+
+    market_data = data['data']
+    change_icon = "📈" if market_data.get("market_cap_change_percentage_24h_usd", 0) >= 0 else "📉"
+    
+    return (f"� *Cryptocurrency Market Overview* 🌐\n\n"
+            f"Total Market Cap: `${market_data.get('total_market_cap', {}).get('usd', 0):,.0f}`\n"
+            f"24h Volume: `${market_data.get('total_volume', {}).get('usd', 0):,.0f}`\n"
+            f"24h Change: {change_icon} {market_data.get('market_cap_change_percentage_24h_usd', 0):.2f}%\n"
+            f"Bitcoin Dominance: `{market_data.get('market_cap_percentage', {}).get('btc', 0):.1f}%`\n"
+            f"Active Cryptos: `{market_data.get('active_cryptocurrencies', 0):,}`")
+
+async def convert_currency(amount, from_symbol, to_symbol):
+    """Convert between cryptocurrencies or to fiat asynchronously."""
+    from_id, to_id = await asyncio.gather(
+        get_coin_id_from_symbol(from_symbol),
+        get_coin_id_from_symbol(to_symbol)
+    )
+
+    if not from_id or not to_id:
+        return None
+
+    params = {"ids": f"{from_id},{to_id}", "vs_currencies": "usd"}
+    data = await make_api_request(f"{COINGECKO_API}/simple/price", params=params)
+
+    if not data or from_id not in data or to_id not in data:
+        return None
+        
+    from_usd = data[from_id].get("usd")
+    to_usd = data[to_id].get("usd")
+
+    if from_usd is None or to_usd is None:
+        return None
+        
+    rate = from_usd / to_usd
+    return float(amount) * rate
+
 # --- Telegram Command Handlers ---
 
 async def start_command(update: telegram.Update, context: ContextTypes.DEFAULT_TYPE):
@@ -277,14 +326,9 @@ async def start_command(update: telegram.Update, context: ContextTypes.DEFAULT_T
     await help_command(update, context)
 
 async def help_command(update: telegram.Update, context: ContextTypes.DEFAULT_TYPE):
-    help_text = ("*Available Commands:*\n"
-                 "/start - Show welcome message\n"
-                 "/trending - Top 10 trending coins\n"
-                 "/top - Top 20 coins by market cap\n"
-                 "/price `<coin>` - Current price of a coin\n"
-                 "/price7d `<coin>` - 7-day price chart\n"
-                 "/news - Latest crypto news\n"
-                 "/feargreed - Fear & Greed Index")
+    commands_list = await context.bot.get_my_commands()
+    help_text = "*Available Commands:*\n"
+    help_text += "\n".join(f"/{cmd.command} - {cmd.description}" for cmd in commands_list)
     await update.message.reply_text(help_text, parse_mode='Markdown')
 
 async def trending_command(update: telegram.Update, context: ContextTypes.DEFAULT_TYPE):
@@ -327,22 +371,53 @@ async def feargreed_command(update: telegram.Update, context: ContextTypes.DEFAU
     message = await get_cached_data("fear_greed", get_fear_and_greed_index)
     await update.message.reply_text(message, parse_mode='Markdown')
 
+async def market_command(update: telegram.Update, context: ContextTypes.DEFAULT_TYPE):
+    message = await get_cached_data("market_overview", get_market_overview)
+    await update.message.reply_text(message, parse_mode='Markdown')
+
+async def convert_command(update: telegram.Update, context: ContextTypes.DEFAULT_TYPE):
+    if len(context.args) != 4 or context.args[2].lower() != 'to':
+        await update.message.reply_text("ℹ️ Usage: `/convert <amount> <from> to <to>`\nExample: `/convert 1 btc to eth`")
+        return
+    
+    try:
+        amount, from_currency, to_currency = float(context.args[0]), context.args[1], context.args[3]
+        result = await convert_currency(amount, from_currency, to_currency)
+        
+        if result is None:
+            await update.message.reply_text("❌ Couldn't perform conversion. Check your currencies or try again in a moment.")
+            return
+            
+        message = (f"💱 *Currency Conversion*\n\n"
+                   f"`{amount:,.4f} {from_currency.upper()} = {result:,.4f} {to_currency.upper()}`")
+        await update.message.reply_text(message, parse_mode='Markdown')
+    except (ValueError, IndexError):
+        await update.message.reply_text("❌ Invalid format. Please use numbers for the amount.")
+
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Log the error and send a telegram message to notify the developer."""
+    """Log the error."""
     logger.error(f"Exception while handling an update: {context.error}", exc_info=context.error)
 
 async def post_init(application: Application):
     """Actions to run after the bot is initialized."""
     await application.bot.set_my_commands([
-        ('start', 'Start the bot'),
-        ('trending', 'See trending coins'),
-        ('top', 'See top coins by market cap'),
+        ('start', 'Start the bot and see help'),
+        ('trending', 'See top 10 trending coins'),
+        ('top', 'See top 20 coins by market cap'),
         ('price', 'Get price for a specific coin'),
         ('price7d', 'Get 7-day price chart for a coin'),
         ('news', 'Get latest crypto news'),
         ('feargreed', 'Check the Fear & Greed Index'),
+        ('market', 'Get a global market overview'),
+        ('convert', 'Convert between currencies'),
         ('help', 'Show this help message'),
     ])
+    logger.info("Custom bot commands have been set.")
+
+async def on_shutdown(application: Application):
+    """Actions to run on graceful shutdown."""
+    await api_client.aclose()
+    logger.info("HTTP client closed.")
 
 def main() -> None:
     """Start the bot."""
@@ -352,6 +427,7 @@ def main() -> None:
 
     builder = Application.builder().token(TELEGRAM_BOT_TOKEN)
     builder.post_init(post_init)
+    builder.post_shutdown(on_shutdown)
     application = builder.build()
 
     # Add command handlers
@@ -363,15 +439,15 @@ def main() -> None:
     application.add_handler(CommandHandler("price", price_command))
     application.add_handler(CommandHandler("price7d", price7d_command))
     application.add_handler(CommandHandler("feargreed", feargreed_command))
+    application.add_handler(CommandHandler("market", market_command))
+    application.add_handler(CommandHandler("convert", convert_command))
     
     application.add_error_handler(error_handler)
 
     logger.info("Crypto Guru bot is starting...")
     
-    try:
-        application.run_polling()
-    except Exception as e:
-        logger.critical(f"Bot failed to start: {e}")
+    # run_polling() is blocking and handles graceful shutdown on SIGINT, SIGTERM, SIGABRT
+    application.run_polling()
 
 if __name__ == '__main__':
     keep_alive_thread = threading.Thread(target=keep_alive)
