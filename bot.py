@@ -1,6 +1,5 @@
-from keep_alive import keep_alive
-import telegram
 from telegram.ext import Application, CommandHandler, ContextTypes
+import telegram
 import requests
 import feedparser
 import os
@@ -11,15 +10,16 @@ import io
 import pandas as pd
 import time
 import logging
+import sys
 
 # --- Configuration ---
-# IMPORTANT: You'll need a Telegram Bot Token from BotFather on Telegram.
 TELEGRAM_BOT_TOKEN = os.environ.get('TELEGRAM_BOT_TOKEN', '7972609552:AAHZvzeRP1B96Nezt0rFnCo54ahKMAiIVH4')
 
 # Set up logging
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    level=logging.INFO
+    level=logging.INFO,
+    stream=sys.stdout
 )
 logger = logging.getLogger(__name__)
 
@@ -67,15 +67,20 @@ def get_coin_id_from_symbol(symbol: str):
     try:
         coin_list = get_cached_data("coins_list", lambda: requests.get(
             f"{COINGECKO_API}/coins/list", 
-            timeout=10  # Add timeout
+            timeout=10
         ).json())
     except Exception as e:
         logger.error(f"Error fetching coin list: {e}")
         return None
     
+    # Handle API error responses
+    if not isinstance(coin_list, list):
+        logger.error(f"Unexpected coin list response: {coin_list}")
+        return None
+    
     # Search for matching symbol
     for coin in coin_list:
-        if coin['symbol'] == symbol:
+        if isinstance(coin, dict) and 'symbol' in coin and coin['symbol'] == symbol:
             return coin['id']
     
     return None
@@ -386,13 +391,20 @@ async def learn_command(update: telegram.Update, context: ContextTypes.DEFAULT_T
 async def disclaimer_command(update: telegram.Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(DISCLAIMER, parse_mode='Markdown')
 
-def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
+async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Log errors caused by updates."""
-    logger.error(f"Update {update} caused error {context.error}")
+    try:
+        if update is None:
+            logger.error(f"Error: {context.error}")
+        else:
+            logger.error(f"Update {update} caused error {context.error}")
+    except Exception as e:
+        logger.error(f"Error in error_handler: {e}")
 
 def main() -> None:
     """Start the bot."""
-    application = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
+    # Configure application with better timeout settings
+    application = Application.builder().token(TELEGRAM_BOT_TOKEN).read_timeout(30).write_timeout(30).build()
 
     # Add command handlers
     application.add_handler(CommandHandler("start", start_command))
@@ -416,5 +428,4 @@ def main() -> None:
     application.run_polling()
 
 if __name__ == '__main__':
-    keep_alive()
     main()
