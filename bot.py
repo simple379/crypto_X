@@ -74,16 +74,31 @@ async def _fetch_coins_list():
         return None
 
 async def get_coin_id_from_symbol(symbol: str):
-    """Get CoinGecko coin ID from a symbol using async requests."""
-    symbol = symbol.lower()
+    """
+    Get CoinGecko coin ID from a symbol, ID, or name.
+    This function is now more robust to find the correct coin.
+    """
+    query = symbol.lower()
     coin_list = await get_cached_data("coins_list", _fetch_coins_list)
     
     if not coin_list:
         return None
 
+    # Priority 1: Exact match on ID
     for coin in coin_list:
-        if coin['symbol'] == symbol:
+        if coin['id'] == query:
             return coin['id']
+            
+    # Priority 2: Exact match on symbol
+    for coin in coin_list:
+        if coin['symbol'] == query:
+            return coin['id']
+            
+    # Priority 3: Case-insensitive match on name
+    for coin in coin_list:
+        if coin['name'].lower() == query:
+            return coin['id']
+
     return None
 
 async def get_trending_coins():
@@ -396,7 +411,7 @@ async def price7d_command(update: telegram.Update, context: ContextTypes.DEFAULT
     historical_data = await get_historical_data(coin_symbol, days=7)
     
     if not historical_data:
-        await context.bot.send_message(chat_id=update.effective_chat.id, text=f"❌ Couldn't get historical data for {coin_symbol.upper()}. The API might be busy. Please try again in a moment.")
+        await context.bot.send_message(chat_id=update.effective_chat.id, text=f"❌ Couldn't get historical data for {coin_symbol.upper()}. The API might be busy or the coin symbol is incorrect. Please try again in a moment.")
         return
         
     chart_buf = await asyncio.to_thread(generate_price_chart, historical_data)
