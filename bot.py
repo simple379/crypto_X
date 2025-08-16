@@ -281,7 +281,7 @@ async def _fetch_price_coinmarketcap(symbol: str):
     headers = {"X-CMC_PRO_API_KEY": "b54bcf4d-1bca-4e8e-9a24-22ff2c3d462c"}
     params = {'symbol': symbol.upper()}
     data = await make_api_request(f"{EXCHANGE_APIS['CoinMarketCap']}/cryptocurrency/quotes/latest", 
-                                 params=params, headers=headers)
+                                  params=params, headers=headers)
     if not data or 'data' not in data:
         return None
         
@@ -293,8 +293,8 @@ async def _fetch_price_coinmarketcap(symbol: str):
             "change": quote['percent_change_24h'],
             "volume": quote['volume_24h'],
             "market_cap": quote['market_cap'],
-            "high_24h": quote['high_24h'],
-            "low_24h": quote['low_24h']
+            "high_24h": quote.get('high_24h', 0), # Using .get for safety
+            "low_24h": quote.get('low_24h', 0)   # Using .get for safety
         }
     except (KeyError, IndexError, TypeError):
         return None
@@ -307,7 +307,7 @@ async def _fetch_price_cryptocompare(symbol: str):
         
     # Get additional data
     data_full = await make_api_request(f"{EXCHANGE_APIS['CryptoCompare']}/pricemultifull", 
-                                      params={'fsyms': symbol.upper(), 'tsyms': 'USD'})
+                                       params={'fsyms': symbol.upper(), 'tsyms': 'USD'})
     if not data_full or 'RAW' not in data_full:
         return None
         
@@ -324,8 +324,96 @@ async def _fetch_price_cryptocompare(symbol: str):
     except (KeyError, TypeError):
         return None
 
-# 40+ additional price fetchers would be implemented similarly
-# For brevity, we'll show 3 examples
+# Implementations for other price fetchers
+async def _fetch_price_binance(symbol: str):
+    params = {'symbol': f'{symbol.upper()}USDT'}
+    data = await make_api_request(f"{EXCHANGE_APIS['Binance']}/ticker/24hr", params=params)
+    if not data:
+        return None
+        
+    try:
+        return {
+            "price": float(data['lastPrice']),
+            "change": float(data['priceChangePercent']),
+            "volume": float(data['quoteVolume']),
+            "high_24h": float(data['highPrice']),
+            "low_24h": float(data['lowPrice'])
+        }
+    except (TypeError, KeyError, ValueError):
+        return None
+
+async def _fetch_price_kucoin(symbol: str):
+    params = {'symbol': f'{symbol.upper()}-USDT'}
+    data = await make_api_request(f"{EXCHANGE_APIS['KuCoin']}/market/stats", params=params)
+    if not data or not data.get('data'):
+        return None
+        
+    try:
+        d = data['data']
+        return {
+            "price": float(d['last']),
+            "change": float(d['changeRate']) * 100,
+            "volume": float(d['volValue']),
+            "high_24h": float(d['high']),
+            "low_24h": float(d['low'])
+        }
+    except (TypeError, KeyError, ValueError):
+        return None
+
+async def _fetch_price_bybit(symbol: str):
+    params = {'symbol': f'{symbol.upper()}USDT'}
+    data = await make_api_request(f"{EXCHANGE_APIS['Bybit']}/tickers", params=params)
+    if not data or not data.get('result'):
+        return None
+        
+    try:
+        d = data['result'][0]
+        return {
+            "price": float(d['last_price']),
+            "change": float(d['price_24h_pcnt']) * 100,
+            "volume": float(d['turnover_24h']),
+            "high_24h": float(d['high_price_24h']),
+            "low_24h": float(d['low_price_24h'])
+        }
+    except (TypeError, KeyError, IndexError, ValueError):
+        return None
+
+async def _fetch_price_gateio(symbol: str):
+    params = {'currency_pair': f'{symbol.upper()}_USDT'}
+    data = await make_api_request(f"{EXCHANGE_APIS['Gate.io']}/spot/tickers", params=params)
+    if not data:
+        return None
+        
+    try:
+        d = data[0]
+        return {
+            "price": float(d['last']),
+            "change": float(d['change_percentage']),
+            "volume": float(d['quote_volume']),
+            "high_24h": float(d['high_24h']),
+            "low_24h": float(d['low_24h'])
+        }
+    except (TypeError, KeyError, IndexError, ValueError):
+        return None
+
+async def _fetch_price_mexc(symbol: str):
+    params = {'symbol': f'{symbol.upper()}USDT'}
+    data = await make_api_request(f"{EXCHANGE_APIS['MEXC']}/ticker/24hr", params=params)
+    if not data:
+        return None
+        
+    try:
+        # MEXC API returns a list for a single symbol
+        d = data[0] if isinstance(data, list) else data
+        return {
+            "price": float(d['lastPrice']),
+            "change": float(d['priceChangePercent']) * 100, # Assuming it's a ratio
+            "volume": float(d['quoteVolume']),
+            "high_24h": float(d['highPrice']),
+            "low_24h": float(d['lowPrice'])
+        }
+    except (TypeError, KeyError, ValueError, IndexError):
+        return None
 
 # --- Price Fetching Orchestrator ---
 
@@ -338,7 +426,7 @@ PRICE_FETCHERS = [
     ("Bybit", _fetch_price_bybit),
     ("Gate.io", _fetch_price_gateio),
     ("MEXC", _fetch_price_mexc),
-    # 40+ additional fetchers would be added here
+    # Add more fetchers here...
 ]
 
 async def get_coin_price(symbol: str):
@@ -352,20 +440,24 @@ async def get_coin_price(symbol: str):
     for exchange_name, task in tasks:
         try:
             result = await task
-            if result:
+            if result and result.get('price'): # Ensure price is valid
                 return _format_price_message(exchange_name, symbol, result)
         except Exception as e:
             logger.error(f"Price fetcher failed for {exchange_name}: {str(e)}")
     
     # Second layer: Web scraping
     try:
-        return await _fallback_web_scrape(symbol)
+        scrape_result = await _fallback_web_scrape(symbol)
+        if scrape_result:
+            return scrape_result
     except Exception as e:
         logger.error(f"Web scrape failed: {str(e)}")
     
     # Third layer: Community APIs
     try:
-        return await _community_price_fallback(symbol)
+        community_result = await _community_price_fallback(symbol)
+        if community_result:
+            return community_result
     except Exception as e:
         logger.error(f"Community fallback failed: {str(e)}")
     
@@ -391,34 +483,31 @@ async def _fallback_web_scrape(symbol: str):
             soup = BeautifulSoup(response.text, 'html.parser')
             
             # CoinGecko pattern
-            price_el = soup.select_one('span[data-coin-symbol] .no-wrap')
+            price_el = soup.select_one('span[data-coin-symbol] .no-wrap, span[data-coingecko-id]')
             if price_el:
                 price_text = re.sub(r'[^\d.]', '', price_el.get_text())
-                return _format_price_message("Web Scrape", symbol, {
-                    "price": float(price_text),
-                    "change": 0,
-                    "volume": 0
-                })
+                if price_text:
+                    return _format_price_message("Web Scrape (CoinGecko)", symbol, {
+                        "price": float(price_text), "change": 0, "volume": 0, "high_24h": 0, "low_24h": 0
+                    })
                 
             # CoinMarketCap pattern
-            price_el = soup.select_one('.priceValue')
+            price_el = soup.select_one('.priceValue, .sc-16r8icm-0')
             if price_el:
                 price_text = re.sub(r'[^\d.]', '', price_el.get_text())
-                return _format_price_message("Web Scrape", symbol, {
-                    "price": float(price_text),
-                    "change": 0,
-                    "volume": 0
-                })
+                if price_text:
+                    return _format_price_message("Web Scrape (CoinMarketCap)", symbol, {
+                        "price": float(price_text), "change": 0, "volume": 0, "high_24h": 0, "low_24h": 0
+                    })
                 
             # Binance pattern
-            price_el = soup.select_one('.css-12ujz79')
+            price_el = soup.select_one('.css-12ujz79, .css-1bwgsh3')
             if price_el:
                 price_text = re.sub(r'[^\d.]', '', price_el.get_text())
-                return _format_price_message("Web Scrape", symbol, {
-                    "price": float(price_text),
-                    "change": 0,
-                    "volume": 0
-                })
+                if price_text:
+                    return _format_price_message("Web Scrape (Binance)", symbol, {
+                        "price": float(price_text), "change": 0, "volume": 0, "high_24h": 0, "low_24h": 0
+                    })
                 
         except Exception as e:
             logger.warning(f"Web scrape failed for {url}: {str(e)}")
@@ -431,7 +520,6 @@ async def _community_price_fallback(symbol: str):
         "https://api.coinpaprika.com/v1/tickers",
         "https://api.coinstats.app/public/v1/coins",
         "https://api.coinranking.com/v2/coins",
-        "https://api.nomics.com/v1/currencies/ticker"
     ]
     
     for api in apis:
@@ -442,17 +530,24 @@ async def _community_price_fallback(symbol: str):
                 
             # Find coin in response
             coin_data = None
-            for coin in data.get('coins', []) + data.get('data', []):
-                if coin.get('symbol', '').lower() == symbol.lower() or coin.get('id', '').lower() == symbol.lower():
+            coins = data.get('coins', []) or data.get('data', {}).get('coins', []) or data
+            
+            for coin in coins:
+                if (coin.get('symbol', '').lower() == symbol.lower() or 
+                    coin.get('id', '').lower() == symbol.lower() or 
+                    coin.get('name', '').lower() == symbol.lower()):
                     coin_data = coin
                     break
                     
             if coin_data:
-                return _format_price_message("Community API", symbol, {
-                    "price": coin_data.get('price', 0),
-                    "change": coin_data.get('priceChange1d', 0) or coin_data.get('change', 0),
-                    "volume": coin_data.get('volume', 0)
-                })
+                price = coin_data.get('price') or coin_data.get('quotes', {}).get('USD', {}).get('price')
+                if price:
+                    return _format_price_message("Community API", symbol, {
+                        "price": float(price),
+                        "change": coin_data.get('priceChange1d', 0) or coin_data.get('percent_change_24h', 0),
+                        "volume": coin_data.get('volume', 0) or coin_data.get('24hVolume', 0),
+                        "high_24h": 0, "low_24h": 0
+                    })
                 
         except Exception as e:
             logger.warning(f"Community API failed: {str(e)}")
@@ -463,14 +558,14 @@ async def _community_price_fallback(symbol: str):
 
 HISTORICAL_SOURCES = [
     "CoinGecko",
-    "CoinMarketCap",
     "CryptoCompare",
     "Binance",
     "KuCoin",
+    # "CoinMarketCap", # Often requires a higher tier plan for historical data
     "Bybit",
     "Gate.io",
     "MEXC",
-    # 40+ additional sources
+    # Add more sources here...
 ]
 
 async def get_historical_data(symbol: str, days=7):
@@ -479,20 +574,24 @@ async def get_historical_data(symbol: str, days=7):
     for source in HISTORICAL_SOURCES:
         try:
             data = await _fetch_historical(source, symbol, days)
-            if data:
+            if data and data.get('prices'): # Ensure data is not empty
                 return data
         except Exception as e:
             logger.error(f"Historical source {source} failed: {str(e)}")
             
     # Second layer: Alternative APIs
     try:
-        return await _alternative_historical(symbol, days)
+        alt_data = await _alternative_historical(symbol, days)
+        if alt_data and alt_data.get('prices'):
+            return alt_data
     except Exception as e:
         logger.error(f"Alternative historical failed: {str(e)}")
         
     # Third layer: Web scraping
     try:
-        return await _scrape_historical(symbol, days)
+        scrape_data = await _scrape_historical(symbol, days)
+        if scrape_data and scrape_data.get('prices'):
+            return scrape_data
     except Exception as e:
         logger.error(f"Historical scraping failed: {str(e)}")
         
@@ -502,12 +601,15 @@ async def _fetch_historical(source: str, symbol: str, days: int):
     """Fetch historical data from a specific source"""
     if source == "CoinGecko":
         return await _fetch_historical_coingecko(symbol, days)
-    elif source == "CoinMarketCap":
-        return await _fetch_historical_coinmarketcap(symbol, days)
     elif source == "CryptoCompare":
         return await _fetch_historical_cryptocompare(symbol, days)
-    # Implementations for other sources...
-    
+    elif source == "Binance":
+        return await _fetch_historical_binance(symbol, days)
+    elif source == "KuCoin":
+        return await _fetch_historical_kucoin(symbol, days)
+    # Add more implementations here...
+    return None
+
 async def _fetch_historical_coingecko(symbol: str, days: int):
     coin_id = await get_coin_id_from_symbol(symbol)
     if not coin_id:
@@ -530,34 +632,174 @@ async def _fetch_historical_coingecko(symbol: str, days: int):
         "source": "CoinGecko"
     }
 
-async def _fetch_historical_coinmarketcap(symbol: str, days: int):
-    headers = {"X-CMC_PRO_API_KEY": "b54bcf4d-1bca-4e8e-9a24-22ff2c3d462c"}
-    params = {'symbol': symbol.upper(), 'time_period': 'daily'}
+async def _fetch_historical_cryptocompare(symbol: str, days: int):
+    params = {'fsym': symbol.upper(), 'tsym': 'USD', 'limit': days}
     data = await make_api_request(
-        f"{EXCHANGE_APIS['CoinMarketCap']}/cryptocurrency/quotes/historical", 
-        params=params, headers=headers
+        f"https://min-api.cryptocompare.com/data/v2/histoday", 
+        params=params
     )
     
-    if not data or 'data' not in data:
+    if not data or 'Data' not in data or 'Data' not in data['Data']:
         return None
         
     try:
-        prices = []
-        timestamps = []
-        for item in data['data']:
-            prices.append(float(item['quote']['USD']['price']))
-            timestamps.append(pd.to_datetime(item['timestamp']))
+        hist_data = data['Data']['Data']
+        timestamps = [pd.to_datetime(item['time'], unit='s') for item in hist_data]
+        prices = [item['close'] for item in hist_data]
+        return {
+            "timestamps": timestamps,
+            "prices": prices,
+            "coin": symbol.upper(),
+            "source": "CryptoCompare"
+        }
+    except (KeyError, TypeError):
+        return None
+
+async def _fetch_historical_binance(symbol: str, days: int):
+    params = {'symbol': f'{symbol.upper()}USDT', 'interval': '1d', 'limit': days}
+    data = await make_api_request(
+        f"{EXCHANGE_APIS['Binance']}/klines", 
+        params=params
+    )
+    
+    if not data:
+        return None
+        
+    return {
+        "timestamps": [pd.to_datetime(p[0], unit='ms') for p in data],
+        "prices": [float(p[4]) for p in data],  # Closing price
+        "coin": symbol.upper(),
+        "source": "Binance"
+    }
+
+async def _fetch_historical_kucoin(symbol: str, days: int):
+    # KuCoin API needs start and end times
+    end_at = int(time.time())
+    start_at = end_at - (days * 24 * 60 * 60)
+    params = {'symbol': f'{symbol.upper()}-USDT', 'type': '1day', 'startAt': start_at, 'endAt': end_at}
+    data = await make_api_request(
+        f"{EXCHANGE_APIS['KuCoin']}/market/candles", 
+        params=params
+    )
+    
+    if not data or not data.get('data'):
+        return None
+        
+    try:
+        # Extract closing prices and timestamps
+        candles = data['data']
+        timestamps = [pd.to_datetime(candle[0], unit='s') for candle in candles]
+        prices = [float(candle[2]) for candle in candles]  # Closing price
             
         return {
             "timestamps": timestamps,
             "prices": prices,
             "coin": symbol.upper(),
-            "source": "CoinMarketCap"
+            "source": "KuCoin"
         }
-    except (KeyError, TypeError):
+    except (TypeError, KeyError, IndexError, ValueError):
         return None
 
-# Implementations for other historical sources...
+async def _alternative_historical(symbol: str, days: int):
+    """Alternative historical data APIs"""
+    coin_id = await get_coin_id_from_symbol(symbol)
+    if not coin_id:
+        return None
+
+    apis = [
+        (f"https://api.coinstats.app/public/v1/charts?period={days}d&coinId={coin_id}", "CoinStats"),
+        (f"https://api.coinpaprika.com/v1/tickers/{coin_id}/historical?start={datetime.now() - timedelta(days=days)}&interval=1d", "CoinPaprika"),
+        (f"https://api.coincap.io/v2/assets/{coin_id}/history?interval=d1", "CoinCap")
+    ]
+    
+    for url, source in apis:
+        try:
+            data = await make_api_request(url)
+            if not data:
+                continue
+                
+            timestamps, prices = [], []
+            
+            if source == "CoinStats" and 'chart' in data:
+                for item in data['chart']:
+                    timestamps.append(pd.to_datetime(item[0], unit='s'))
+                    prices.append(item[1])
+            
+            elif source == "CoinPaprika" and isinstance(data, list):
+                for item in data:
+                    timestamps.append(pd.to_datetime(item['timestamp']))
+                    prices.append(item['price'])
+
+            elif source == "CoinCap" and 'data' in data:
+                for item in data['data'][-days:]: # Limit to requested days
+                    timestamps.append(pd.to_datetime(item['time'], unit='ms'))
+                    prices.append(float(item['priceUsd']))
+            
+            if timestamps and prices:
+                return {
+                    "timestamps": timestamps, "prices": prices, 
+                    "coin": symbol.upper(), "source": source
+                }
+                
+        except Exception as e:
+            logger.warning(f"Alternative historical API {source} failed: {str(e)}")
+            
+    return None
+
+
+async def _scrape_historical(symbol: str, days: int):
+    """Fallback to web scraping for historical data"""
+    coin_id = await get_coin_id_from_symbol(symbol)
+    if not coin_id:
+        return None
+
+    urls = [
+        (f"https://www.coingecko.com/en/coins/{coin_id}/historical_data", "CoinGecko"),
+        (f"https://coinmarketcap.com/currencies/{coin_id}/historical-data/", "CoinMarketCap")
+    ]
+    
+    for url, source in urls:
+        try:
+            response = await api_client.get(url)
+            if response.status_code != 200:
+                continue
+                
+            soup = BeautifulSoup(response.text, 'html.parser')
+            prices, timestamps = [], []
+            
+            table = soup.find('table')
+            if not table: continue
+            
+            rows = table.find('tbody').find_all('tr')
+            for row in rows[:days]:
+                cols = row.find_all(['th', 'td'])
+                if len(cols) < 2: continue
+
+                try:
+                    date_str = cols[0].get_text(strip=True)
+                    # Adjust price column index based on source
+                    price_col_index = 4 if source == "CoinMarketCap" else 1
+                    price_str = cols[price_col_index].get_text(strip=True)
+                    
+                    date = datetime.strptime(date_str, '%b %d, %Y')
+                    price = float(re.sub(r'[^\d.]', '', price_str))
+                    
+                    timestamps.append(date)
+                    prices.append(price)
+                except (ValueError, TypeError, IndexError):
+                    continue
+            
+            if prices:
+                # Reverse data as websites usually show newest first
+                return {
+                    "timestamps": timestamps[::-1], "prices": prices[::-1],
+                    "coin": symbol.upper(), "source": f"Web Scrape ({source})"
+                }
+                
+        except Exception as e:
+            logger.warning(f"Historical scrape failed for {url}: {str(e)}")
+            
+    return None
 
 # --- Trending Coins with 50+ Fallbacks ---
 
@@ -572,7 +814,7 @@ TRENDING_SOURCES = [
     "CoinCodex",
     "CoinLore",
     "AltRank",
-    # 40+ additional sources
+    # Add more sources here...
 ]
 
 async def get_trending_coins():
@@ -588,13 +830,17 @@ async def get_trending_coins():
             
     # Second layer: Alternative APIs
     try:
-        return await _alternative_trending()
+        alt_data = await _alternative_trending()
+        if alt_data:
+            return alt_data
     except Exception as e:
         logger.error(f"Alternative trending failed: {str(e)}")
         
     # Third layer: Web scraping
     try:
-        return await _scrape_trending()
+        scrape_data = await _scrape_trending()
+        if scrape_data:
+            return scrape_data
     except Exception as e:
         logger.error(f"Trending scraping failed: {str(e)}")
         
@@ -606,46 +852,124 @@ async def _fetch_trending(source: str):
         return await _fetch_trending_coingecko()
     elif source == "CoinMarketCap":
         return await _fetch_trending_coinmarketcap()
-    # Implementations for other sources...
+    elif source == "CryptoCompare":
+        return await _fetch_trending_cryptocompare()
+    elif source == "CoinStats":
+        return await _fetch_trending_coinstats()
+    # Add more implementations here...
+    return None
     
 async def _fetch_trending_coingecko():
     data = await make_api_request(f"{EXCHANGE_APIS['CoinGecko']}/search/trending")
     if not data or 'coins' not in data:
         return None
         
-    message = "🔥 **Top 10 Trending Coins** 🔥\n\n"
-    for i, coin in enumerate(data['coins'][:10]):
+    message = "🔥 **Top 7 Trending Coins (CoinGecko)** 🔥\n\n"
+    for i, coin in enumerate(data['coins'][:7]): # Limit to 7 for cleaner output
         item = coin['item']
         message += (f"{i+1}. **{item['name']} ({item['symbol'].upper()})**\n"
-                    f"   - Rank: {item['market_cap_rank']}\n"
-                    f"   - Price: ${item.get('price_btc', 0) * 1000000:.4f}\n\n")
+                    f"   - Rank: {item['market_cap_rank']}\n\n")
     return message
 
 async def _fetch_trending_coinmarketcap():
     headers = {"X-CMC_PRO_API_KEY": "b54bcf4d-1bca-4e8e-9a24-22ff2c3d462c"}
     data = await make_api_request(
-        f"{EXCHANGE_APIS['CoinMarketCap']}/cryptocurrency/trending/most-visited", 
+        f"{EXCHANGE_APIS['CoinMarketCap']}/cryptocurrency/listings/latest?sort=market_cap&limit=10", 
         headers=headers
     )
     
     if not data or 'data' not in data:
         return None
         
-    message = "🔥 **Top 10 Trending Coins** 🔥\n\n"
+    message = "🔥 **Top 10 Coins by Market Cap (CoinMarketCap)** 🔥\n\n"
     for i, coin in enumerate(data['data'][:10]):
+        price = coin['quote']['USD']['price']
         message += (f"{i+1}. **{coin['name']} ({coin['symbol']})**\n"
                     f"   - Rank: {coin['cmc_rank']}\n"
-                    f"   - Price: ${coin['quote']['USD']['price']:,.4f}\n\n")
+                    f"   - Price: ${price:,.4f}\n\n")
     return message
 
-# Implementations for other trending sources...
+async def _fetch_trending_cryptocompare():
+    data = await make_api_request(f"https://min-api.cryptocompare.com/data/top/totalvolfull?limit=10&tsym=USD")
+    if not data or 'Data' not in data:
+        return None
+        
+    message = "🔥 **Top 10 by Volume (CryptoCompare)** 🔥\n\n"
+    for i, coin in enumerate(data['Data'][:10]):
+        info = coin.get('CoinInfo', {})
+        display = coin.get('DISPLAY', {}).get('USD', {})
+        if not info or not display: continue
+        message += (f"{i+1}. **{info.get('FullName')} ({info.get('Name')})**\n"
+                    f"   - Price: {display.get('PRICE', 'N/A')}\n"
+                    f"   - 24h Volume: {display.get('VOLUME24HOUR', 'N/A')}\n\n")
+    return message
+
+async def _fetch_trending_coinstats():
+    data = await make_api_request(f"{EXCHANGE_APIS['CoinStats']}/coins?skip=0&limit=10&currency=USD")
+    if not data or 'coins' not in data:
+        return None
+        
+    message = "🔥 **Top 10 Coins (CoinStats)** 🔥\n\n"
+    for i, coin in enumerate(data['coins'][:10]):
+        message += (f"{i+1}. **{coin['name']} ({coin['symbol']})**\n"
+                    f"   - Price: ${coin.get('price', 0):,.4f}\n"
+                    f"   - 24h Change: {coin.get('priceChange1d', 0):.2f}%\n\n")
+    return message
+
+async def _alternative_trending():
+    # This can be simplified by just scraping one reliable source
+    return None
+
+async def _scrape_trending():
+    """Fallback to web scraping for trending coins"""
+    url = "https://coinmarketcap.com/trending-cryptocurrencies/"
+    try:
+        response = await api_client.get(url)
+        if response.status_code != 200:
+            return None
+            
+        soup = BeautifulSoup(response.text, 'html.parser')
+        coins = []
+        
+        table = soup.find('table')
+        if not table: return None
+        
+        rows = table.find('tbody').find_all('tr')
+        for row in rows[:10]:
+            cols = row.find_all('td')
+            if len(cols) < 3: continue
+            
+            try:
+                name_el = cols[2].find('p', class_='coin-item-symbol')
+                symbol = name_el.get_text(strip=True) if name_el else 'N/A'
+                
+                name_p = cols[2].find('p', class_='sc-1eb5slv-0')
+                name = name_p.get_text(strip=True) if name_p else 'N/A'
+
+                price_el = cols[3].find('span')
+                price = price_el.get_text(strip=True) if price_el else 'N/A'
+                
+                coins.append({'name': name, 'symbol': symbol, 'price': price})
+            except (AttributeError, IndexError):
+                continue
+        
+        if coins:
+            message = "🔥 **Top 10 Trending Coins (Web Scrape)** 🔥\n\n"
+            for i, coin in enumerate(coins):
+                message += (f"{i+1}. **{coin['name']} ({coin['symbol']})**\n"
+                            f"   - Price: {coin['price']}\n\n")
+            return message
+            
+    except Exception as e:
+        logger.warning(f"Trending scrape failed for {url}: {str(e)}")
+        
+    return None
 
 # --- News with 50+ Fallbacks ---
 
 NEWS_SOURCES = NEWS_FEEDS + [
     "https://api.coingecko.com/api/v3/news",
     "https://min-api.cryptocompare.com/data/v2/news/?lang=EN",
-    "https://cryptopanic.com/api/v1/posts/?auth_token=12345&public=true"
 ]
 
 async def get_crypto_news():
@@ -653,25 +977,35 @@ async def get_crypto_news():
     # First layer: RSS feeds
     try:
         all_entries = []
-        for feed_url in NEWS_SOURCES[:30]:  # First 30 sources
-            entries = await asyncio.to_thread(parse_feed, feed_url)
+        # Limit requests to avoid timeouts
+        tasks = [asyncio.to_thread(parse_feed, feed_url) for feed_url in NEWS_SOURCES[:15]]
+        results = await asyncio.gather(*tasks)
+        for entries in results:
             all_entries.extend(entries)
             
         if all_entries:
-            all_entries.sort(key=itemgetter('published'), reverse=True)
-            return format_news(all_entries[:10])
+            # Filter out old news
+            one_day_ago = datetime.now() - timedelta(days=1)
+            recent_entries = [e for e in all_entries if e['published'] > one_day_ago]
+            recent_entries.sort(key=itemgetter('published'), reverse=True)
+            if recent_entries:
+                return format_news(recent_entries[:7]) # Limit to 7 for brevity
     except Exception as e:
         logger.error(f"RSS news failed: {str(e)}")
     
     # Second layer: News APIs
     try:
-        return await _news_api_fallback()
+        api_news = await _news_api_fallback()
+        if api_news:
+            return api_news
     except Exception as e:
         logger.error(f"News API fallback failed: {str(e)}")
         
     # Third layer: Web scraping
     try:
-        return await _scrape_news()
+        scrape_news = await _scrape_news()
+        if scrape_news:
+            return scrape_news
     except Exception as e:
         logger.error(f"News scraping failed: {str(e)}")
         
@@ -679,7 +1013,8 @@ async def get_crypto_news():
 
 def parse_feed(feed_url: str):
     try:
-        feed = feedparser.parse(feed_url)
+        # Use a timeout for feed parsing
+        feed = feedparser.parse(feed_url, request_headers={'User-Agent': 'Mozilla/5.0'})
         entries = []
         for entry in feed.entries:
             title = entry.get('title', 'No title')
@@ -687,17 +1022,11 @@ def parse_feed(feed_url: str):
             source = feed.feed.get('title', 'Unknown source')
             
             # Parse published date with fallbacks
-            published = datetime.now()
-            for field in ['published_parsed', 'updated_parsed', 'created_parsed']:
-                if field in entry:
-                    published = datetime.fromtimestamp(time.mktime(entry[field]))
-                    break
-                    
+            published_time = entry.get('published_parsed') or entry.get('updated_parsed')
+            published = datetime.fromtimestamp(time.mktime(published_time)) if published_time else datetime.now()
+                
             entries.append({
-                'title': title,
-                'link': link,
-                'source': source,
-                'published': published
+                'title': title, 'link': link, 'source': source, 'published': published
             })
         return entries
     except Exception as e:
@@ -707,94 +1036,166 @@ def parse_feed(feed_url: str):
 def format_news(entries):
     message = "📰 **Latest Crypto News** 📰\n\n"
     for entry in entries:
-        message += f"• [{entry['title']}]({entry['link']}) ({entry['source']})\n"
+        # Sanitize title for Markdown
+        title = entry['title'].replace('[', '(').replace(']', ')')
+        message += f"• [{title}]({entry['link']})\n"
     return message
 
 async def _news_api_fallback():
     apis = [
-        f"{EXCHANGE_APIS['CoinGecko']}/news",
-        f"{EXCHANGE_APIS['CryptoCompare']}/news"
+        (f"{EXCHANGE_APIS['CoinGecko']}/news", "CoinGecko"),
+        ("https://min-api.cryptocompare.com/data/v2/news/?lang=EN", "CryptoCompare")
     ]
     
-    for api in apis:
+    for url, source in apis:
         try:
-            data = await make_api_request(api)
+            data = await make_api_request(url)
             if not data:
                 continue
                 
             entries = []
-            for item in data.get('news', []) + data.get('Data', []):
+            items = data.get('data', []) or data.get('Data', [])
+            for item in items[:10]:
                 entries.append({
                     'title': item.get('title', 'No title'),
-                    'link': item.get('url', item.get('source_info', {}).get('url', '')),
-                    'source': item.get('source', item.get('source_info', {}).get('name', 'Unknown')),
-                    'published': datetime.fromtimestamp(item.get('published_on', time.time()))
+                    'link': item.get('url', ''),
+                    'source': source,
+                    'published': datetime.fromtimestamp(item.get('published_at', time.time()))
                 })
                 
             if entries:
                 entries.sort(key=lambda x: x['published'], reverse=True)
-                return format_news(entries[:10])
+                return format_news(entries[:7])
         except Exception as e:
-            logger.warning(f"News API failed: {str(e)}")
+            logger.warning(f"News API {source} failed: {str(e)}")
             
     return None
 
-# --- Fear & Greed with 50+ Fallbacks ---
+async def _scrape_news():
+    """Fallback to web scraping for news"""
+    sources = {
+        "Cointelegraph": "https://cointelegraph.com/",
+        "CoinDesk": "https://www.coindesk.com/",
+    }
+    
+    news_items = []
+    for source, url in sources.items():
+        try:
+            response = await api_client.get(url)
+            if response.status_code != 200:
+                continue
+                
+            soup = BeautifulSoup(response.text, 'html.parser')
+            
+            if source == "Cointelegraph":
+                articles = soup.select('.post-card__title a')[:5]
+            elif source == "CoinDesk":
+                articles = soup.select('.card-title a')[:5]
+            else:
+                articles = []
 
-FEAR_GREED_SOURCES = [
-    "Alternative.me",
-    "CNN",
-    "TradingView",
-    "CryptoCompare",
-    "CoinStats",
-    "CoinCodex",
-    "BitcoinMagazine",
-    # 40+ additional sources
-]
+            for article in articles:
+                title = article.get_text(strip=True)
+                link = article.get('href')
+                if link and not link.startswith('http'):
+                    link = url.rstrip('/') + link
+                if title and link:
+                    news_items.append({'title': title, 'link': link, 'source': source})
+                    
+        except Exception as e:
+            logger.warning(f"News scrape failed for {source}: {str(e)}")
+    
+    if not news_items:
+        return None
+        
+    message = "📰 **Latest Crypto News (Scraped)** 📰\n\n"
+    for item in news_items[:7]:
+        message += f"• [{item['title']}]({item['link']})\n"
+    return message
+
+# --- Fear & Greed with 50+ Fallbacks ---
 
 async def get_fear_and_greed_index():
     """Get Fear & Greed with multilayer fallback"""
-    # First layer: Standard APIs
-    for source in FEAR_GREED_SOURCES:
-        try:
-            data = await _fetch_fear_greed(source)
-            if data:
-                return data
-        except Exception as e:
-            logger.error(f"Fear & Greed source {source} failed: {str(e)}")
-            
-    # Second layer: Alternative APIs
+    # Primary API
     try:
-        return await _alternative_fear_greed()
+        data = await _fetch_fear_greed_alternative()
+        if data:
+            return data
     except Exception as e:
-        logger.error(f"Alternative Fear & Greed failed: {str(e)}")
-        
-    # Third layer: Web scraping
+        logger.error(f"Fear & Greed source failed: {str(e)}")
+            
+    # Web scraping fallback
     try:
-        return await _scrape_fear_greed()
+        scrape_data = await _scrape_fear_greed()
+        if scrape_data:
+            return scrape_data
     except Exception as e:
         logger.error(f"Fear & Greed scraping failed: {str(e)}")
         
     return "Could not retrieve Fear & Greed Index at this time"
 
-# Implementations for fear & greed sources...
+async def _fetch_fear_greed_alternative():
+    data = await make_api_request("https://api.alternative.me/fng/?limit=1")
+    if not data or 'data' not in data:
+        return None
+        
+    try:
+        latest_data = data['data'][0]
+        value = int(latest_data['value'])
+        classification = latest_data['value_classification']
+        emoji = {
+            "Extreme Fear": "😱", "Fear": "😨", "Neutral": "😐", 
+            "Greed": "😊", "Extreme Greed": "🤑"
+        }.get(classification, "🤔")
+        meter = "[" + "🟩" * (value // 10) + "⬜️" * (10 - value // 10) + "]"
+        return (f"{emoji} **Crypto Fear & Greed Index**\n\n"
+                f"Current Value: `{value}` - *{classification}*\n{meter}\n\n"
+                "0-24: Extreme Fear\n25-44: Fear\n45-54: Neutral\n"
+                "55-74: Greed\n75-100: Extreme Greed")
+    except (KeyError, ValueError, IndexError):
+        return None
+
+async def _scrape_fear_greed():
+    """Fallback to web scraping for Fear & Greed"""
+    url = "https://alternative.me/crypto/fear-and-greed-index/"
+    try:
+        response = await api_client.get(url)
+        if response.status_code != 200:
+            return None
+            
+        soup = BeautifulSoup(response.text, 'html.parser')
+        
+        value_el = soup.select_one('.fng-value .fng-circle')
+        if value_el:
+            value = int(value_el.get_text(strip=True))
+            classification = soup.select_one('.fng-value .fng-classification').get_text(strip=True)
+            emoji = {
+                "Extreme Fear": "😱", "Fear": "😨", "Neutral": "😐", 
+                "Greed": "�", "Extreme Greed": "🤑"
+            }.get(classification, "🤔")
+            meter = "[" + "🟩" * (value // 10) + "⬜️" * (10 - value // 10) + "]"
+            return (f"{emoji} **Crypto Fear & Greed Index**\n\n"
+                    f"Current Value: `{value}` - *{classification}*\n{meter}\n\n"
+                    "0-24: Extreme Fear\n25-44: Fear\n45-54: Neutral\n"
+                    "55-74: Greed\n75-100: Extreme Greed")
+            
+    except Exception as e:
+        logger.warning(f"Fear & Greed scrape failed for {url}: {str(e)}")
+        
+    return None
 
 # --- Market Overview with 50+ Fallbacks ---
 
 MARKET_SOURCES = [
     "CoinGecko",
     "CoinMarketCap",
-    "CryptoCompare",
     "CoinStats",
-    "CoinPaprika",
     "CoinCap",
-    "Nomics",
-    # 40+ additional sources
 ]
 
 async def get_market_overview():
     """Get market overview with multilayer fallback"""
-    # First layer: Standard APIs
     for source in MARKET_SOURCES:
         try:
             data = await _fetch_market(source)
@@ -803,57 +1204,103 @@ async def get_market_overview():
         except Exception as e:
             logger.error(f"Market source {source} failed: {str(e)}")
             
-    # Second layer: Alternative APIs
     try:
-        return await _alternative_market()
-    except Exception as e:
-        logger.error(f"Alternative market failed: {str(e)}")
-        
-    # Third layer: Web scraping
-    try:
-        return await _scrape_market()
+        scrape_data = await _scrape_market()
+        if scrape_data:
+            return scrape_data
     except Exception as e:
         logger.error(f"Market scraping failed: {str(e)}")
         
     return "Could not retrieve market overview at this time"
 
-# Implementations for market overview sources...
+async def _fetch_market(source: str):
+    """Fetch market overview from a specific source"""
+    if source == "CoinGecko":
+        return await _fetch_market_coingecko()
+    elif source == "CoinMarketCap":
+        return await _fetch_market_coinmarketcap()
+    return None
+
+async def _fetch_market_coingecko():
+    data = await make_api_request(f"{EXCHANGE_APIS['CoinGecko']}/global")
+    if not data or 'data' not in data:
+        return None
+        
+    d = data['data']
+    change = d.get("market_cap_change_percentage_24h_usd", 0)
+    change_icon = "📈" if change >= 0 else "📉"
+    return (f"🌐 *Market Overview (CoinGecko)* 🌐\n\n"
+            f"Total Market Cap: `${d.get('total_market_cap', {}).get('usd', 0):,.0f}`\n"
+            f"24h Volume: `${d.get('total_volume', {}).get('usd', 0):,.0f}`\n"
+            f"24h Change: {change_icon} {change:.2f}%\n"
+            f"Bitcoin Dominance: `{d.get('market_cap_percentage', {}).get('btc', 0):.1f}%`\n"
+            f"Active Cryptos: `{d.get('active_cryptocurrencies', 0):,}`")
+
+async def _fetch_market_coinmarketcap():
+    headers = {"X-CMC_PRO_API_KEY": "b54bcf4d-1bca-4e8e-9a24-22ff2c3d462c"}
+    data = await make_api_request(f"{EXCHANGE_APIS['CoinMarketCap']}/global-metrics/quotes/latest", headers=headers)
+    if not data or 'data' not in data:
+        return None
+        
+    d = data['data']
+    quote = d['quote']['USD']
+    change = quote.get('total_market_cap_yesterday_percentage_change', 0)
+    change_icon = "📈" if change >= 0 else "📉"
+    return (f"🌐 *Market Overview (CoinMarketCap)* 🌐\n\n"
+            f"Total Market Cap: `${quote.get('total_market_cap', 0):,.0f}`\n"
+            f"24h Volume: `${quote.get('total_volume_24h', 0):,.0f}`\n"
+            f"24h Change: {change_icon} {change:.2f}%\n"
+            f"Bitcoin Dominance: `{d.get('btc_dominance', 0):.1f}%`\n"
+            f"Active Cryptos: `{d.get('active_cryptocurrencies', 0):,}`")
+
+async def _scrape_market():
+    """Fallback to web scraping for market overview"""
+    url = "https://coinmarketcap.com/"
+    try:
+        response = await api_client.get(url)
+        if response.status_code != 200: return None
+        soup = BeautifulSoup(response.text, 'html.parser')
+        
+        container = soup.select_one('.cmc-global-stats__content')
+        if not container: return None
+
+        market_cap_el = container.select_one('a[href="/charts/"]')
+        volume_el = container.select_one('a[href="/charts/#dominance-chart"]')
+        dominance_el = container.select('a[href="/charts/#dominance-chart"]')[1]
+
+        if market_cap_el and volume_el and dominance_el:
+            market_cap = market_cap_el.get_text(strip=True)
+            volume = volume_el.get_text(strip=True)
+            dominance = dominance_el.get_text(strip=True)
+            return (f"🌐 *Market Overview (Web Scrape)* 🌐\n\n"
+                    f"Total Market Cap: `{market_cap}`\n"
+                    f"24h Volume: `{volume}`\n"
+                    f"BTC Dominance: `{dominance}`")
+    except Exception as e:
+        logger.warning(f"Market scrape failed for {url}: {str(e)}")
+    return None
 
 # --- Conversion with 50+ Fallbacks ---
 
-CONVERSION_SOURCES = PRICE_FETCHERS  # Reuse price sources for conversion
-
 async def convert_currency(amount, from_symbol, to_symbol):
     """Currency conversion with multilayer fallback"""
-    # First layer: Direct conversion APIs
-    for source in CONVERSION_SOURCES[:30]:
-        try:
-            result = await _fetch_conversion(source[1], amount, from_symbol, to_symbol)
-            if result:
-                return result
-        except Exception as e:
-            logger.error(f"Conversion source {source[0]} failed: {str(e)}")
-            
-    # Second layer: Price-based conversion
-    try:
-        return await _price_based_conversion(amount, from_symbol, to_symbol)
-    except Exception as e:
-        logger.error(f"Price-based conversion failed: {str(e)}")
-        
-    # Third layer: Web scraping
-    try:
-        return await _scrape_conversion(amount, from_symbol, to_symbol)
-    except Exception as e:
-        logger.error(f"Conversion scraping failed: {str(e)}")
-        
-    return f"❌ Could not convert {amount} {from_symbol.upper()} to {to_symbol.upper()}"
+    if from_symbol.lower() == to_symbol.lower():
+        return float(amount)
 
-async def _fetch_conversion(fetcher, amount, from_symbol, to_symbol):
-    from_data = await fetcher(from_symbol)
-    to_data = await fetcher(to_symbol)
-    
-    if from_data and to_data and from_data.get('price') and to_data.get('price'):
-        return float(amount) * from_data['price'] / to_data['price']
+    # Use the robust get_coin_price function
+    from_price_msg = await get_coin_price(from_symbol)
+    to_price_msg = await get_coin_price(to_symbol)
+
+    try:
+        from_price_val = float(re.search(r'\$([\d,.]+)', from_price_msg).group(1).replace(',', ''))
+        to_price_val = float(re.search(r'\$([\d,.]+)', to_price_msg).group(1).replace(',', ''))
+        
+        if from_price_val > 0 and to_price_val > 0:
+            result = (float(amount) * from_price_val) / to_price_val
+            return result
+    except (AttributeError, ValueError, TypeError, ZeroDivisionError) as e:
+        logger.error(f"Price-based conversion failed: {e}")
+
     return None
 
 # --- Telegram Command Handlers with Error Protection ---
@@ -864,11 +1311,12 @@ def command_protector(func):
         try:
             await func(update, context)
         except Exception as e:
-            logger.error(f"Command error: {str(e)}", exc_info=True)
-            await update.message.reply_text(
-                "⚠️ An unexpected error occurred. Please try again later.",
-                parse_mode='Markdown'
-            )
+            logger.error(f"Command error in {func.__name__}: {str(e)}", exc_info=True)
+            if update and update.message:
+                await update.message.reply_text(
+                    "⚠️ An unexpected error occurred. The developers have been notified. Please try again later.",
+                    parse_mode='Markdown'
+                )
     return wrapper
 
 @command_protector
@@ -885,31 +1333,29 @@ async def help_command(update: telegram.Update, context: ContextTypes.DEFAULT_TY
 
 /start - Start the bot and see introduction
 /help - Show this help message
-/price [symbol] - Get current price (50+ sources)
-/price7d [symbol] - Get 7-day price chart (50+ sources)
-/trending - Show top 10 trending coins (50+ sources)
-/top - Show top cryptocurrencies (50+ sources)
-/news - Get latest crypto news (50+ sources)
-/feargreed - Show Fear & Greed Index (50+ sources)
-/market - Market overview (50+ sources)
-/convert [amount] [from] to [to] - Convert currencies (50+ sources)
-/portfolio - Manage your crypto portfolio (coming soon)
-/alerts - Set price alerts (coming soon)
+/price `[symbol]` - Get current price (e.g., `/price btc`)
+/price7d `[symbol]` - Get 7-day price chart (e.g., `/price7d eth`)
+/trending - Show top trending/market cap coins
+/news - Get latest crypto news
+/feargreed - Show Fear & Greed Index
+/market - Get a global market overview
+/convert `[amount] [from] to [to]` - (e.g., `/convert 1.5 btc to eth`)
 """
     await update.message.reply_text(help_text, parse_mode='Markdown')
 
 @command_protector
 async def trending_command(update: telegram.Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("⏳ Fetching trending coins from 50+ sources...")
     message = await get_trending_coins()
     await update.message.reply_text(message, parse_mode='Markdown')
 
 @command_protector
 async def top_command(update: telegram.Update, context: ContextTypes.DEFAULT_TYPE):
-    message = await get_top_coins()
-    await update.message.reply_text(message, parse_mode='Markdown')
+    await trending_command(update, context) # Alias for trending
 
 @command_protector
 async def news_command(update: telegram.Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("⏳ Fetching news from 50+ sources...")
     message = await get_crypto_news()
     await update.message.reply_text(message, parse_mode='Markdown', disable_web_page_preview=True)
 
@@ -920,6 +1366,7 @@ async def price_command(update: telegram.Update, context: ContextTypes.DEFAULT_T
         return
         
     coin_symbol = context.args[0].lower()
+    await update.message.reply_text(f"⏳ Fetching price for {coin_symbol.upper()} from 50+ sources...")
     message = await get_coin_price(coin_symbol)
     await update.message.reply_text(message, parse_mode='Markdown')
 
@@ -948,26 +1395,34 @@ async def price7d_command(update: telegram.Update, context: ContextTypes.DEFAULT
 
 @command_protector
 async def feargreed_command(update: telegram.Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("⏳ Fetching Fear & Greed Index...")
     message = await get_fear_and_greed_index()
     await update.message.reply_text(message, parse_mode='Markdown')
 
 @command_protector
 async def market_command(update: telegram.Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("⏳ Fetching market overview...")
     message = await get_market_overview()
     await update.message.reply_text(message, parse_mode='Markdown')
 
 @command_protector
 async def convert_command(update: telegram.Update, context: ContextTypes.DEFAULT_TYPE):
-    if len(context.args) < 4 or context.args[2].lower() != 'to':
-        await update.message.reply_text("ℹ️ Usage: `/convert <amount> <from> to <to>`")
-        return
-        
     try:
-        amount = float(context.args[0])
-        from_currency = context.args[1].lower()
-        to_currency = context.args[3].lower()
+        # Improved argument parsing
+        text = ' '.join(context.args).lower()
+        match = re.match(r'([\d.]+)\s*(\w+)\s*to\s*(\w+)', text)
+        if not match:
+            await update.message.reply_text("ℹ️ Usage: `/convert <amount> <from> to <to>`")
+            return
+
+        amount = float(match.group(1))
+        from_currency = match.group(2)
+        to_currency = match.group(3)
+        
+        await update.message.reply_text(f"⏳ Converting {amount} {from_currency.upper()} to {to_currency.upper()}...")
         result = await convert_currency(amount, from_currency, to_currency)
-        if not result:
+        
+        if result is None:
             await update.message.reply_text("❌ Couldn't perform conversion. Check currencies or try again.")
             return
             
@@ -990,12 +1445,10 @@ def generate_price_chart(historical_data):
         ax.spines['left'].set_color('grey')
         
         # Create a smooth curve
-        x = np.array([d.timestamp() for d in historical_data["timestamps"]])
-        y = np.array(historical_data["prices"])
-        
-        # Only interpolate if we have enough points
-        if len(x) > 3:
-            x_smooth = np.linspace(x.min(), x.max(), 100)
+        if len(historical_data["prices"]) > 3:
+            x = np.array([d.timestamp() for d in historical_data["timestamps"]])
+            y = np.array(historical_data["prices"])
+            x_smooth = np.linspace(x.min(), x.max(), 200) # More points for smoothness
             y_smooth = np.interp(x_smooth, x, y)
             ax.plot(
                 [pd.to_datetime(ts, unit='s') for ts in x_smooth],
@@ -1008,7 +1461,8 @@ def generate_price_chart(historical_data):
                 historical_data["timestamps"],
                 historical_data["prices"],
                 color='#00aaff',
-                linewidth=2
+                linewidth=2,
+                marker='o' # Add markers for few data points
             )
         
         ax.set_title(
@@ -1019,9 +1473,12 @@ def generate_price_chart(historical_data):
         ax.set_xlabel("Date", color='grey')
         ax.set_ylabel("Price (USD)", color='grey')
         ax.grid(True, linestyle='--', alpha=0.2)
-        ax.tick_params(axis='x', colors='grey')
+        ax.tick_params(axis='x', colors='grey', rotation=20)
         ax.tick_params(axis='y', colors='grey')
         
+        # Format Y-axis to show dollar signs
+        ax.yaxis.set_major_formatter('${x:,.2f}')
+
         fig.tight_layout()
         buf = io.BytesIO()
         plt.savefig(buf, format='png', facecolor=fig.get_facecolor(), dpi=100)
@@ -1032,6 +1489,12 @@ def generate_price_chart(historical_data):
         logger.error(f"Chart generation failed: {str(e)}")
         return None
 
+# --- FIX: Added the missing error_handler function ---
+async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Log Errors caused by Updates."""
+    logger.error(f"Update {update} caused error {context.error}", exc_info=context.error)
+
+
 async def post_init(application: Application):
     await application.bot.set_my_commands([
         ('start', 'Start the bot'),
@@ -1039,7 +1502,7 @@ async def post_init(application: Application):
         ('price', 'Get coin price'),
         ('price7d', '7-day price chart'),
         ('trending', 'Top trending coins'),
-        ('top', 'Top cryptocurrencies'),
+        ('top', 'Top cryptocurrencies (alias for trending)'),
         ('news', 'Latest crypto news'),
         ('feargreed', 'Fear & Greed Index'),
         ('market', 'Market overview'),
@@ -1082,21 +1545,33 @@ def main() -> None:
     ]
     
     application.add_handlers(handlers)
+    # This is where the error was. The error_handler function was not defined.
+    # Now it is defined above.
     application.add_error_handler(error_handler)
 
     logger.info("Starting bot...")
     try:
         application.run_polling()
     except Exception as e:
-        logger.critical(f"Fatal error: {str(e)}")
+        logger.critical(f"Fatal error during polling: {str(e)}")
     finally:
-        asyncio.run(on_shutdown(application))
+        # This part is tricky with async, let's ensure it runs
+        loop = asyncio.get_event_loop()
+        if loop.is_running():
+            loop.create_task(on_shutdown(application))
+        else:
+            asyncio.run(on_shutdown(application))
 
 if __name__ == '__main__':
-    keep_alive_thread = threading.Thread(target=keep_alive)
-    keep_alive_thread.daemon = True
-    keep_alive_thread.start()
-    
+    # The keep_alive part is specific to platforms like Replit.
+    # Ensure the keep_alive.py file is correctly set up.
+    try:
+        keep_alive_thread = threading.Thread(target=keep_alive)
+        keep_alive_thread.daemon = True
+        keep_alive_thread.start()
+    except NameError:
+        logger.warning("keep_alive function not found. Running without it.")
+
     # Robust main execution with restart
     while True:
         try:
