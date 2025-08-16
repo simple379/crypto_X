@@ -1,7 +1,12 @@
 python-telegram-bot
-requests 
-feedparser 
-python-dotenv 
-matplotlib 
+httpx
+feedparser
 pandas
-flask
+numpy
+matplotlib
+beautifulsoup4
+lxml
+Flask
+python-dotenv
+Pillow
+
